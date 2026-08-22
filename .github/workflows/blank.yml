@@ -109,105 +109,188 @@ jobs:
     - name: Install Roblox Studio
       shell: pwsh
       run: |
-        Write-Host "Downloading Roblox Studio bootstrapper..." -ForegroundColor Green
-        $rsUrl = "https://setup.rbxcdn.com/RobloxStudioLauncherBeta.exe"
-        $installerPath = "$env:TEMP\RobloxStudioLauncher.exe"
+        $ErrorActionPreference = "Stop"
+        Write-Host "=== Installing Roblox Studio ===" -ForegroundColor Green
+
+        # Official Roblox Studio bootstrapper URL
+        $rsUrl = "https://setup.rbxcdn.com/RobloxStudio.exe"
+        $installerPath = "$env:TEMP\RobloxStudio.exe"
+
+        Write-Host "Downloading from: $rsUrl" -ForegroundColor Cyan
         try {
           Invoke-WebRequest -Uri $rsUrl -OutFile $installerPath -UseBasicParsing
-          Write-Host "Installing Roblox Studio silently..." -ForegroundColor Green
-          Start-Process -FilePath $installerPath -ArgumentList "/S", "/silent", "/quiet" -Wait -ErrorAction SilentlyContinue
-          Start-Sleep -Seconds 30
-          Write-Host "Roblox Studio installer executed!" -ForegroundColor Green
         } catch {
-          Write-Host "Roblox Studio install had issues: $_" -ForegroundColor Yellow
+          Write-Host "Primary URL failed, trying alternate bootstrapper..." -ForegroundColor Yellow
+          $rsUrl = "https://setup.rbxcdn.com/RobloxStudioLauncherBeta.exe"
+          $installerPath = "$env:TEMP\RobloxStudioLauncherBeta.exe"
+          Invoke-WebRequest -Uri $rsUrl -OutFile $installerPath -UseBasicParsing
         }
-        if (Test-Path $installerPath) { Remove-Item $installerPath -Force -ErrorAction SilentlyContinue }
+
+        if (-not (Test-Path $installerPath)) {
+          throw "Roblox Studio installer download failed."
+        }
+
+        $sizeMB = [math]::Round((Get-Item $installerPath).Length / 1MB, 2)
+        Write-Host "Downloaded installer size: $sizeMB MB" -ForegroundColor Cyan
+
+        Write-Host "Running Roblox Studio bootstrapper..." -ForegroundColor Green
+        # Roblox bootstrapper does not have documented silent switches;
+        # it auto-downloads Studio when launched. We start it and wait for completion.
+        $proc = Start-Process -FilePath $installerPath -PassThru
+        Write-Host "Bootstrapper PID: $($proc.Id)" -ForegroundColor Cyan
+
+        # Wait up to 10 minutes for the bootstrapper + downloader chain to finish
+        $timeoutSec = 600
+        $elapsed = 0
+        $studioExe = $null
+
+        while ($elapsed -lt $timeoutSec) {
+          Start-Sleep -Seconds 15
+          $elapsed += 15
+
+          # Look for RobloxStudioBeta.exe under any user's LocalAppData
+          $searchRoots = @(
+            "$env:LOCALAPPDATA\Roblox\Versions",
+            "C:\Users\runneradmin\AppData\Local\Roblox\Versions",
+            "C:\Users\Default\AppData\Local\Roblox\Versions"
+          )
+
+          foreach ($root in $searchRoots) {
+            if (Test-Path $root) {
+              $found = Get-ChildItem -Path $root -Recurse -Filter "RobloxStudioBeta.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+              if ($found) {
+                $studioExe = $found.FullName
+                break
+              }
+            }
+          }
+
+          if ($studioExe) {
+            Write-Host "Roblox Studio found at: $studioExe (after $elapsed s)" -ForegroundColor Green
+            break
+          }
+
+          Write-Host "Still waiting for Roblox Studio to be installed... ($elapsed / $timeoutSec s)" -ForegroundColor Yellow
+        }
+
+        # Kill any lingering bootstrapper / studio processes
+        Get-Process -Name "RobloxStudio","RobloxStudioBeta","RobloxStudioLauncherBeta","RobloxPlayerLauncher" -ErrorAction SilentlyContinue | ForEach-Object {
+          try { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue } catch {}
+        }
+
+        # Final verification
+        if (-not $studioExe) {
+          $globalFound = Get-ChildItem -Path "C:\Users" -Recurse -Filter "RobloxStudioBeta.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($globalFound) {
+            $studioExe = $globalFound.FullName
+          }
+        }
+
+        if (-not $studioExe) {
+          Write-Host "ERROR: Roblox Studio installation failed. RobloxStudioBeta.exe not found." -ForegroundColor Red
+          throw "Roblox Studio installation failed."
+        }
+
+        Write-Host "=== Roblox Studio installed successfully ===" -ForegroundColor Green
+        Write-Host "Executable path: $studioExe" -ForegroundColor Green
+        "ROBLOX_STUDIO_PATH=$studioExe" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+        if (Test-Path $installerPath) {
+          Remove-Item $installerPath -Force -ErrorAction SilentlyContinue
+        }
 
     - name: Enable Windows Dark Mode (for runneradmin)
       shell: pwsh
       run: |
         Write-Host "Configuring Windows Dark Mode for runneradmin..." -ForegroundColor Green
 
-        # Load the runneradmin user's registry hive
+        # Ensure runneradmin profile exists
         $userProfile = "C:\Users\runneradmin"
         if (-not (Test-Path $userProfile)) {
-          Write-Host "Creating profile for runneradmin by triggering logon..." -ForegroundColor Yellow
-          # Force profile creation
-          $cred = New-Object System.Management.Automation.PSCredential("runneradmin", (ConvertTo-SecureString "P@ssw0rd!" -AsPlainText -Force))
+          Write-Host "Profile does not exist yet. Triggering profile creation..." -ForegroundColor Yellow
           try {
-            Start-Process cmd.exe -Credential $cred -ArgumentList "/c echo profile" -LoadUserProfile -WorkingDirectory "C:\" -WindowStyle Hidden -ErrorAction SilentlyContinue
-            Start-Sleep -Seconds 5
+            $cred = New-Object System.Management.Automation.PSCredential("runneradmin", (ConvertTo-SecureString "P@ssw0rd!" -AsPlainText -Force))
+            Start-Process cmd.exe -Credential $cred -ArgumentList "/c echo profile_created" -LoadUserProfile -WorkingDirectory "C:\" -WindowStyle Hidden
+            Start-Sleep -Seconds 8
           } catch {
-            Write-Host "Profile creation attempt: $_" -ForegroundColor Yellow
+            Write-Host "Profile creation attempt info: $_" -ForegroundColor Yellow
           }
         }
 
+        # Load the runneradmin hive
         $ntUserDat = "C:\Users\runneradmin\NTUSER.DAT"
         $hiveLoaded = $false
         if (Test-Path $ntUserDat) {
           try {
-            reg load "HKU\RunnerAdminHive" $ntUserDat 2>$null
+            reg load "HKU\RunnerAdminHive" $ntUserDat | Out-Null
             $hiveLoaded = $true
             Write-Host "Loaded runneradmin registry hive." -ForegroundColor Green
           } catch {
-            Write-Host "Could not load hive: $_" -ForegroundColor Yellow
+            Write-Host "Could not load runneradmin hive: $_" -ForegroundColor Yellow
           }
+        } else {
+          Write-Host "NTUSER.DAT for runneradmin not found." -ForegroundColor Yellow
         }
 
         if ($hiveLoaded) {
-          $personalizePath = "HKU:\RunnerAdminHive\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
+          $personalizePath = "Registry::HKEY_USERS\RunnerAdminHive\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
           if (-not (Test-Path $personalizePath)) {
             New-Item -Path $personalizePath -Force | Out-Null
           }
-          New-ItemProperty -Path $personalizePath -Name "AppsUseLightTheme" -Value 0 -PropertyType DWord -Force | Out-Null
+          New-ItemProperty -Path $personalizePath -Name "AppsUseLightTheme"   -Value 0 -PropertyType DWord -Force | Out-Null
           New-ItemProperty -Path $personalizePath -Name "SystemUsesLightTheme" -Value 0 -PropertyType DWord -Force | Out-Null
           Write-Host "Dark Mode applied to runneradmin hive." -ForegroundColor Green
 
           [gc]::Collect()
           Start-Sleep -Seconds 2
-          reg unload "HKU\RunnerAdminHive" 2>$null
+          reg unload "HKU\RunnerAdminHive" | Out-Null
         }
 
-        # Also apply to current user (fallback / current runner session)
-        $personalizeCurrent = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
-        if (-not (Test-Path $personalizeCurrent)) {
-          New-Item -Path $personalizeCurrent -Force | Out-Null
-        }
-        Set-ItemProperty -Path $personalizeCurrent -Name "AppsUseLightTheme" -Value 0 -Type DWord -Force
-        Set-ItemProperty -Path $personalizeCurrent -Name "SystemUsesLightTheme" -Value 0 -Type DWord -Force
-        Write-Host "Dark Mode applied to current user." -ForegroundColor Green
-
-        # Apply to Default user profile so future logons inherit dark mode
+        # Apply also to the Default user profile (so any future user gets Dark Mode)
         $defaultHive = "C:\Users\Default\NTUSER.DAT"
         if (Test-Path $defaultHive) {
           try {
-            reg load "HKU\DefaultHive" $defaultHive 2>$null
-            $defPersonalize = "HKU:\DefaultHive\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
+            reg load "HKU\DefaultHive" $defaultHive | Out-Null
+            $defPersonalize = "Registry::HKEY_USERS\DefaultHive\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
             if (-not (Test-Path $defPersonalize)) {
               New-Item -Path $defPersonalize -Force | Out-Null
             }
-            New-ItemProperty -Path $defPersonalize -Name "AppsUseLightTheme" -Value 0 -PropertyType DWord -Force | Out-Null
+            New-ItemProperty -Path $defPersonalize -Name "AppsUseLightTheme"   -Value 0 -PropertyType DWord -Force | Out-Null
             New-ItemProperty -Path $defPersonalize -Name "SystemUsesLightTheme" -Value 0 -PropertyType DWord -Force | Out-Null
             [gc]::Collect()
             Start-Sleep -Seconds 2
-            reg unload "HKU\DefaultHive" 2>$null
+            reg unload "HKU\DefaultHive" | Out-Null
             Write-Host "Dark Mode applied to Default profile." -ForegroundColor Green
           } catch {
             Write-Host "Default hive tweak failed: $_" -ForegroundColor Yellow
           }
         }
 
-        # Restart Explorer to apply theme
-        try {
-          Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue
-          Start-Sleep -Seconds 2
-          Start-Process explorer.exe -ErrorAction SilentlyContinue
-          Write-Host "Explorer restarted." -ForegroundColor Green
-        } catch {
-          Write-Host "Explorer restart notice: $_" -ForegroundColor Yellow
+        # Apply to current session user as a safety net
+        $personalizeCurrent = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
+        if (-not (Test-Path $personalizeCurrent)) {
+          New-Item -Path $personalizeCurrent -Force | Out-Null
+        }
+        Set-ItemProperty -Path $personalizeCurrent -Name "AppsUseLightTheme"   -Value 0 -Type DWord -Force
+        Set-ItemProperty -Path $personalizeCurrent -Name "SystemUsesLightTheme" -Value 0 -Type DWord -Force
+        Write-Host "Dark Mode applied to current runner user." -ForegroundColor Green
+
+        # Restart Explorer only if it is currently running (safe check)
+        $explorer = Get-Process -Name explorer -ErrorAction SilentlyContinue
+        if ($explorer) {
+          try {
+            Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 2
+            Start-Process explorer.exe
+            Write-Host "Explorer restarted to apply theme." -ForegroundColor Green
+          } catch {
+            Write-Host "Explorer restart notice: $_" -ForegroundColor Yellow
+          }
+        } else {
+          Write-Host "Explorer not currently running; theme will apply at next logon." -ForegroundColor Yellow
         }
 
-    - name: Connection Details
+    - name: Final Status Report
       shell: pwsh
       run: |
         Write-Host "`n=== CONNECTION DETAILS (TAILSCALE) ===" -ForegroundColor Green
@@ -219,17 +302,52 @@ jobs:
         Write-Host " Password: P@ssw0rd!" -ForegroundColor White
         Write-Host "==========================================" -ForegroundColor Cyan
 
-        Write-Host "`n=== INSTALLED SOFTWARE ===" -ForegroundColor Yellow
-        Write-Host " - Google Chrome" -ForegroundColor White
-        Write-Host " - 7-Zip" -ForegroundColor White
-        Write-Host " - Roblox Studio" -ForegroundColor White
-        Write-Host " - Tailscale (VPN)" -ForegroundColor White
+        # Status checks
+        $rdpEnabled = (Get-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections").fDenyTSConnections -eq 0
+        $tsExists = Test-Path "C:\Program Files\Tailscale\tailscale.exe"
+        $tsStatus = if ($tsExists) { (& "C:\Program Files\Tailscale\tailscale.exe" status 2>&1 | Out-String) } else { "not installed" }
+        $tsOk = $tsExists -and ($tsStatus -notmatch "offline") -and ($tsStatus -notmatch "Logged out") -and (-not [string]::IsNullOrWhiteSpace($tsStatus))
+
+        $chromePaths = @(
+          "C:\Program Files\Google\Chrome\Application\chrome.exe",
+          "C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"
+        )
+        $chromeOk = $false
+        foreach ($p in $chromePaths) { if (Test-Path $p) { $chromeOk = $true; break } }
+
+        $sevenZipOk = Test-Path "C:\Program Files\7-Zip\7z.exe"
+
+        $studioOk = $false
+        $studioPath = $env:ROBLOX_STUDIO_PATH
+        if ($studioPath -and (Test-Path $studioPath)) {
+          $studioOk = $true
+        } else {
+          $globalFound = Get-ChildItem -Path "C:\Users" -Recurse -Filter "RobloxStudioBeta.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($globalFound) {
+            $studioOk = $true
+            $studioPath = $globalFound.FullName
+          }
+        }
+
+        $darkOk = $true
+        try {
+          $val = (Get-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize" -Name "AppsUseLightTheme" -ErrorAction Stop).AppsUseLightTheme
+          if ($val -ne 0) { $darkOk = $false }
+        } catch { $darkOk = $false }
+
+        function Fmt($ok) { if ($ok) { "OK" } else { "FAIL" } }
 
         Write-Host "`n=== ENVIRONMENT STATUS ===" -ForegroundColor Yellow
-        Write-Host " - RDP: Enabled" -ForegroundColor Green
-        Write-Host " - Firewall: RDP allowed" -ForegroundColor Green
-        Write-Host " - Dark Mode: Enabled" -ForegroundColor Green
-        Write-Host " - Instance #: ${{ github.event.inputs.instance_number }}" -ForegroundColor Green
+        Write-Host (" - RDP        : {0}" -f (Fmt $rdpEnabled))   -ForegroundColor White
+        Write-Host (" - Tailscale  : {0}" -f (Fmt $tsOk))         -ForegroundColor White
+        Write-Host (" - Dark Mode  : {0}" -f (Fmt $darkOk))       -ForegroundColor White
+        Write-Host (" - Chrome     : {0}" -f (Fmt $chromeOk))     -ForegroundColor White
+        Write-Host (" - 7-Zip      : {0}" -f (Fmt $sevenZipOk))   -ForegroundColor White
+        Write-Host (" - Roblox Studio : {0}" -f (Fmt $studioOk))  -ForegroundColor White
+        if ($studioPath) {
+          Write-Host ("   -> Studio path: $studioPath") -ForegroundColor Cyan
+        }
+        Write-Host (" - Instance # : ${{ github.event.inputs.instance_number }}") -ForegroundColor White
 
         Write-Host "`nConnection Instructions:" -ForegroundColor Yellow
         Write-Host "1. Install Tailscale on your device (phone, tablet, Mac, Linux, Windows)" -ForegroundColor White
