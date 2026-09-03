@@ -13,372 +13,119 @@ jobs:
   deploy-rdp:
     runs-on: windows-latest
     timeout-minutes: 360
-
+    
     steps:
     - name: Checkout Repository
       uses: actions/checkout@v4
-
+      
     - name: System Information
-      shell: pwsh
       run: |
         Write-Host "=== ENIGMANO RDP DEPLOYMENT ===" -ForegroundColor Green
         Write-Host "Instance Number: ${{ github.event.inputs.instance_number }}" -ForegroundColor Yellow
         Write-Host "Runner: $env:RUNNER_NAME" -ForegroundColor Yellow
         Write-Host "Workflow: $env:GITHUB_WORKFLOW" -ForegroundColor Yellow
-
+        
         Write-Host "`n=== SYSTEM SPECIFICATIONS ===" -ForegroundColor Cyan
         Get-ComputerInfo | Select-Object WindowsProductName, WindowsVersion, TotalPhysicalMemory
-        Get-CimInstance -ClassName Win32_Processor | Select-Object Name, NumberOfCores, NumberOfLogicalProcessors
-
+        Get-WmiObject -Class Win32_Processor | Select-Object Name, NumberOfCores, NumberOfLogicalProcessors
+        
     - name: Enable RDP
-      shell: pwsh
       run: |
         Write-Host "Enabling Remote Desktop..." -ForegroundColor Green
-        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
+        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -name "fDenyTSConnections" -Value 0
         Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
-        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 1
-        Write-Host "RDP Enabled!" -ForegroundColor Green
-
-    - name: Create/Configure User Account
-      shell: pwsh
+        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -name "UserAuthentication" -Value 1
+        
+    - name: Create User Account
       run: |
         Write-Host "Setting up user account..." -ForegroundColor Green
         $Password = ConvertTo-SecureString "P@ssw0rd!" -AsPlainText -Force
-        $user = Get-LocalUser -Name "runneradmin" -ErrorAction SilentlyContinue
-        if ($null -eq $user) {
-          New-LocalUser -Name "runneradmin" -Password $Password -FullName "runneradmin" -Description "RDP User" -PasswordNeverExpires
-          Add-LocalGroupMember -Group "Administrators" -Member "runneradmin" -ErrorAction SilentlyContinue
-        } else {
-          Set-LocalUser -Name "runneradmin" -Password $Password
-        }
-        Add-LocalGroupMember -Group "Remote Desktop Users" -Member "runneradmin" -ErrorAction SilentlyContinue
+        Set-LocalUser -Name "runneradmin" -Password $Password
+        Add-LocalGroupMember -Group "Remote Desktop Users" -Member "runneradmin"
         Write-Host "Username: runneradmin" -ForegroundColor Yellow
         Write-Host "Password: P@ssw0rd!" -ForegroundColor Yellow
-
+        
     - name: Install Tailscale (Silent)
-      shell: pwsh
       run: |
         Write-Host "Downloading Tailscale..." -ForegroundColor Green
-        $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi"
+        $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
         $installerPath = "$env:TEMP\tailscale.msi"
-        Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath -UseBasicParsing
+        Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
         Write-Host "Installing Tailscale silently..." -ForegroundColor Green
         Start-Process msiexec.exe -ArgumentList "/i `"$installerPath`" /quiet /norestart" -Wait
         Remove-Item $installerPath -Force
         Write-Host "Tailscale installed successfully!" -ForegroundColor Green
-
+        
     - name: Start Tailscale
-      shell: pwsh
       run: |
         Write-Host "Starting Tailscale..." -ForegroundColor Green
-        & "C:\Program Files\Tailscale\tailscale.exe" up --authkey "${{ secrets.TAILSCALE_AUTH_KEY }}" --hostname "enigmano-${{ github.run_id }}"
+        & "C:\Program Files\Tailscale\tailscale.exe" up --authkey ${{ secrets.TAILSCALE_AUTH_KEY }} --hostname "enigmano-${{ github.run_id }}"
         Start-Sleep -Seconds 15
-
+        
     - name: Get Tailscale IP
-      shell: pwsh
       run: |
         $tsIP = & "C:\Program Files\Tailscale\tailscale.exe" ip -4
-        $tsIP = $tsIP.Trim()
         Write-Host "Tailscale IP: $tsIP" -ForegroundColor Green
-        "TAILSCALE_IP=$tsIP" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-
-    - name: Install Google Chrome
-      shell: pwsh
+        echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+        
+    - name: Install Google Chrome (Direct)
       run: |
         Write-Host "Downloading Google Chrome..." -ForegroundColor Green
         $chromeUrl = "https://dl.google.com/chrome/install/latest/chrome_installer.exe"
         $installerPath = "$env:TEMP\chrome_installer.exe"
-        Invoke-WebRequest -Uri $chromeUrl -OutFile $installerPath -UseBasicParsing
+        Invoke-WebRequest -Uri $chromeUrl -OutFile $installerPath
         Write-Host "Installing Google Chrome silently..." -ForegroundColor Green
         Start-Process -FilePath $installerPath -ArgumentList "/silent /install" -Wait
         Remove-Item $installerPath -Force
         Write-Host "Google Chrome installed!" -ForegroundColor Green
-
-    - name: Install 7-Zip
-      shell: pwsh
+        
+    - name: Install 7-Zip (Direct)
       run: |
         Write-Host "Downloading 7-Zip..." -ForegroundColor Green
         $zipUrl = "https://www.7-zip.org/a/7z2409-x64.exe"
         $installerPath = "$env:TEMP\7z-installer.exe"
-        Invoke-WebRequest -Uri $zipUrl -OutFile $installerPath -UseBasicParsing
+        Invoke-WebRequest -Uri $zipUrl -OutFile $installerPath
         Write-Host "Installing 7-Zip silently..." -ForegroundColor Green
         Start-Process -FilePath $installerPath -ArgumentList "/S" -Wait
         Remove-Item $installerPath -Force
         Write-Host "7-Zip installed!" -ForegroundColor Green
-
-    - name: Install Roblox Studio
-      shell: pwsh
-      run: |
-        $ErrorActionPreference = "Stop"
-        Write-Host "=== Installing Roblox Studio ===" -ForegroundColor Green
-
-        # Official Roblox Studio bootstrapper URL
-        $rsUrl = "https://setup.rbxcdn.com/RobloxStudio.exe"
-        $installerPath = "$env:TEMP\RobloxStudio.exe"
-
-        Write-Host "Downloading from: $rsUrl" -ForegroundColor Cyan
-        try {
-          Invoke-WebRequest -Uri $rsUrl -OutFile $installerPath -UseBasicParsing
-        } catch {
-          Write-Host "Primary URL failed, trying alternate bootstrapper..." -ForegroundColor Yellow
-          $rsUrl = "https://setup.rbxcdn.com/RobloxStudioLauncherBeta.exe"
-          $installerPath = "$env:TEMP\RobloxStudioLauncherBeta.exe"
-          Invoke-WebRequest -Uri $rsUrl -OutFile $installerPath -UseBasicParsing
-        }
-
-        if (-not (Test-Path $installerPath)) {
-          throw "Roblox Studio installer download failed."
-        }
-
-        $sizeMB = [math]::Round((Get-Item $installerPath).Length / 1MB, 2)
-        Write-Host "Downloaded installer size: $sizeMB MB" -ForegroundColor Cyan
-
-        Write-Host "Running Roblox Studio bootstrapper..." -ForegroundColor Green
-        # Roblox bootstrapper does not have documented silent switches;
-        # it auto-downloads Studio when launched. We start it and wait for completion.
-        $proc = Start-Process -FilePath $installerPath -PassThru
-        Write-Host "Bootstrapper PID: $($proc.Id)" -ForegroundColor Cyan
-
-        # Wait up to 10 minutes for the bootstrapper + downloader chain to finish
-        $timeoutSec = 600
-        $elapsed = 0
-        $studioExe = $null
-
-        while ($elapsed -lt $timeoutSec) {
-          Start-Sleep -Seconds 15
-          $elapsed += 15
-
-          # Look for RobloxStudioBeta.exe under any user's LocalAppData
-          $searchRoots = @(
-            "$env:LOCALAPPDATA\Roblox\Versions",
-            "C:\Users\runneradmin\AppData\Local\Roblox\Versions",
-            "C:\Users\Default\AppData\Local\Roblox\Versions"
-          )
-
-          foreach ($root in $searchRoots) {
-            if (Test-Path $root) {
-              $found = Get-ChildItem -Path $root -Recurse -Filter "RobloxStudioBeta.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
-              if ($found) {
-                $studioExe = $found.FullName
-                break
-              }
-            }
-          }
-
-          if ($studioExe) {
-            Write-Host "Roblox Studio found at: $studioExe (after $elapsed s)" -ForegroundColor Green
-            break
-          }
-
-          Write-Host "Still waiting for Roblox Studio to be installed... ($elapsed / $timeoutSec s)" -ForegroundColor Yellow
-        }
-
-        # Kill any lingering bootstrapper / studio processes
-        Get-Process -Name "RobloxStudio","RobloxStudioBeta","RobloxStudioLauncherBeta","RobloxPlayerLauncher" -ErrorAction SilentlyContinue | ForEach-Object {
-          try { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue } catch {}
-        }
-
-        # Final verification
-        if (-not $studioExe) {
-          $globalFound = Get-ChildItem -Path "C:\Users" -Recurse -Filter "RobloxStudioBeta.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
-          if ($globalFound) {
-            $studioExe = $globalFound.FullName
-          }
-        }
-
-        if (-not $studioExe) {
-          Write-Host "ERROR: Roblox Studio installation failed. RobloxStudioBeta.exe not found." -ForegroundColor Red
-          throw "Roblox Studio installation failed."
-        }
-
-        Write-Host "=== Roblox Studio installed successfully ===" -ForegroundColor Green
-        Write-Host "Executable path: $studioExe" -ForegroundColor Green
-        "ROBLOX_STUDIO_PATH=$studioExe" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-
-        if (Test-Path $installerPath) {
-          Remove-Item $installerPath -Force -ErrorAction SilentlyContinue
-        }
-
-    - name: Enable Windows Dark Mode (for runneradmin)
-      shell: pwsh
-      run: |
-        Write-Host "Configuring Windows Dark Mode for runneradmin..." -ForegroundColor Green
-
-        # Ensure runneradmin profile exists
-        $userProfile = "C:\Users\runneradmin"
-        if (-not (Test-Path $userProfile)) {
-          Write-Host "Profile does not exist yet. Triggering profile creation..." -ForegroundColor Yellow
-          try {
-            $cred = New-Object System.Management.Automation.PSCredential("runneradmin", (ConvertTo-SecureString "P@ssw0rd!" -AsPlainText -Force))
-            Start-Process cmd.exe -Credential $cred -ArgumentList "/c echo profile_created" -LoadUserProfile -WorkingDirectory "C:\" -WindowStyle Hidden
-            Start-Sleep -Seconds 8
-          } catch {
-            Write-Host "Profile creation attempt info: $_" -ForegroundColor Yellow
-          }
-        }
-
-        # Load the runneradmin hive
-        $ntUserDat = "C:\Users\runneradmin\NTUSER.DAT"
-        $hiveLoaded = $false
-        if (Test-Path $ntUserDat) {
-          try {
-            reg load "HKU\RunnerAdminHive" $ntUserDat | Out-Null
-            $hiveLoaded = $true
-            Write-Host "Loaded runneradmin registry hive." -ForegroundColor Green
-          } catch {
-            Write-Host "Could not load runneradmin hive: $_" -ForegroundColor Yellow
-          }
-        } else {
-          Write-Host "NTUSER.DAT for runneradmin not found." -ForegroundColor Yellow
-        }
-
-        if ($hiveLoaded) {
-          $personalizePath = "Registry::HKEY_USERS\RunnerAdminHive\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
-          if (-not (Test-Path $personalizePath)) {
-            New-Item -Path $personalizePath -Force | Out-Null
-          }
-          New-ItemProperty -Path $personalizePath -Name "AppsUseLightTheme"   -Value 0 -PropertyType DWord -Force | Out-Null
-          New-ItemProperty -Path $personalizePath -Name "SystemUsesLightTheme" -Value 0 -PropertyType DWord -Force | Out-Null
-          Write-Host "Dark Mode applied to runneradmin hive." -ForegroundColor Green
-
-          [gc]::Collect()
-          Start-Sleep -Seconds 2
-          reg unload "HKU\RunnerAdminHive" | Out-Null
-        }
-
-        # Apply also to the Default user profile (so any future user gets Dark Mode)
-        $defaultHive = "C:\Users\Default\NTUSER.DAT"
-        if (Test-Path $defaultHive) {
-          try {
-            reg load "HKU\DefaultHive" $defaultHive | Out-Null
-            $defPersonalize = "Registry::HKEY_USERS\DefaultHive\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
-            if (-not (Test-Path $defPersonalize)) {
-              New-Item -Path $defPersonalize -Force | Out-Null
-            }
-            New-ItemProperty -Path $defPersonalize -Name "AppsUseLightTheme"   -Value 0 -PropertyType DWord -Force | Out-Null
-            New-ItemProperty -Path $defPersonalize -Name "SystemUsesLightTheme" -Value 0 -PropertyType DWord -Force | Out-Null
-            [gc]::Collect()
-            Start-Sleep -Seconds 2
-            reg unload "HKU\DefaultHive" | Out-Null
-            Write-Host "Dark Mode applied to Default profile." -ForegroundColor Green
-          } catch {
-            Write-Host "Default hive tweak failed: $_" -ForegroundColor Yellow
-          }
-        }
-
-        # Apply to current session user as a safety net
-        $personalizeCurrent = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
-        if (-not (Test-Path $personalizeCurrent)) {
-          New-Item -Path $personalizeCurrent -Force | Out-Null
-        }
-        Set-ItemProperty -Path $personalizeCurrent -Name "AppsUseLightTheme"   -Value 0 -Type DWord -Force
-        Set-ItemProperty -Path $personalizeCurrent -Name "SystemUsesLightTheme" -Value 0 -Type DWord -Force
-        Write-Host "Dark Mode applied to current runner user." -ForegroundColor Green
-
-        # Restart Explorer only if it is currently running (safe check)
-        $explorer = Get-Process -Name explorer -ErrorAction SilentlyContinue
-        if ($explorer) {
-          try {
-            Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue
-            Start-Sleep -Seconds 2
-            Start-Process explorer.exe
-            Write-Host "Explorer restarted to apply theme." -ForegroundColor Green
-          } catch {
-            Write-Host "Explorer restart notice: $_" -ForegroundColor Yellow
-          }
-        } else {
-          Write-Host "Explorer not currently running; theme will apply at next logon." -ForegroundColor Yellow
-        }
-
-    - name: Final Status Report
-      shell: pwsh
+        
+    - name: Connection Details
       run: |
         Write-Host "`n=== CONNECTION DETAILS (TAILSCALE) ===" -ForegroundColor Green
-        Write-Host "==========================================" -ForegroundColor Cyan
-        Write-Host "         ENIGMANO RDP ACCESS              " -ForegroundColor Cyan
-        Write-Host "==========================================" -ForegroundColor Cyan
-        Write-Host " Host: $env:TAILSCALE_IP" -ForegroundColor White
-        Write-Host " Username: runneradmin" -ForegroundColor White
-        Write-Host " Password: P@ssw0rd!" -ForegroundColor White
-        Write-Host "==========================================" -ForegroundColor Cyan
-
-        # Status checks
-        $rdpEnabled = (Get-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections").fDenyTSConnections -eq 0
-        $tsExists = Test-Path "C:\Program Files\Tailscale\tailscale.exe"
-        $tsStatus = if ($tsExists) { (& "C:\Program Files\Tailscale\tailscale.exe" status 2>&1 | Out-String) } else { "not installed" }
-        $tsOk = $tsExists -and ($tsStatus -notmatch "offline") -and ($tsStatus -notmatch "Logged out") -and (-not [string]::IsNullOrWhiteSpace($tsStatus))
-
-        $chromePaths = @(
-          "C:\Program Files\Google\Chrome\Application\chrome.exe",
-          "C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"
-        )
-        $chromeOk = $false
-        foreach ($p in $chromePaths) { if (Test-Path $p) { $chromeOk = $true; break } }
-
-        $sevenZipOk = Test-Path "C:\Program Files\7-Zip\7z.exe"
-
-        $studioOk = $false
-        $studioPath = $env:ROBLOX_STUDIO_PATH
-        if ($studioPath -and (Test-Path $studioPath)) {
-          $studioOk = $true
-        } else {
-          $globalFound = Get-ChildItem -Path "C:\Users" -Recurse -Filter "RobloxStudioBeta.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
-          if ($globalFound) {
-            $studioOk = $true
-            $studioPath = $globalFound.FullName
-          }
-        }
-
-        $darkOk = $true
-        try {
-          $val = (Get-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize" -Name "AppsUseLightTheme" -ErrorAction Stop).AppsUseLightTheme
-          if ($val -ne 0) { $darkOk = $false }
-        } catch { $darkOk = $false }
-
-        function Fmt($ok) { if ($ok) { "OK" } else { "FAIL" } }
-
-        Write-Host "`n=== ENVIRONMENT STATUS ===" -ForegroundColor Yellow
-        Write-Host (" - RDP        : {0}" -f (Fmt $rdpEnabled))   -ForegroundColor White
-        Write-Host (" - Tailscale  : {0}" -f (Fmt $tsOk))         -ForegroundColor White
-        Write-Host (" - Dark Mode  : {0}" -f (Fmt $darkOk))       -ForegroundColor White
-        Write-Host (" - Chrome     : {0}" -f (Fmt $chromeOk))     -ForegroundColor White
-        Write-Host (" - 7-Zip      : {0}" -f (Fmt $sevenZipOk))   -ForegroundColor White
-        Write-Host (" - Roblox Studio : {0}" -f (Fmt $studioOk))  -ForegroundColor White
-        if ($studioPath) {
-          Write-Host ("   -> Studio path: $studioPath") -ForegroundColor Cyan
-        }
-        Write-Host (" - Instance # : ${{ github.event.inputs.instance_number }}") -ForegroundColor White
-
+        Write-Host "╔══════════════════════════════════════╗" -ForegroundColor Cyan
+        Write-Host "║         ENIGMANO RDP ACCESS          ║" -ForegroundColor Cyan  
+        Write-Host "╠══════════════════════════════════════╣" -ForegroundColor Cyan
+        Write-Host "║ Host: $env:TAILSCALE_IP              ║" -ForegroundColor White
+        Write-Host "║ Username: runneradmin                ║" -ForegroundColor White
+        Write-Host "║ Password: P@ssw0rd!                  ║" -ForegroundColor White
+        Write-Host "╚══════════════════════════════════════╝" -ForegroundColor Cyan
+        
         Write-Host "`nConnection Instructions:" -ForegroundColor Yellow
-        Write-Host "1. Install Tailscale on your device (phone, tablet, Mac, Linux, Windows)" -ForegroundColor White
+        Write-Host "1. Install Tailscale on your device (phone, tablet, Mac, Linux)" -ForegroundColor White
         Write-Host "2. Log in with the same Tailscale account" -ForegroundColor White
         Write-Host "3. Open Remote Desktop app and enter the IP above" -ForegroundColor White
         Write-Host "4. Use the provided credentials" -ForegroundColor White
-
+        
     - name: Keep Session Alive
-      shell: pwsh
       run: |
         Write-Host "`n=== SESSION ACTIVE ===" -ForegroundColor Green
         Write-Host "EnigMano RDP instance is now running!" -ForegroundColor Cyan
         Write-Host "Instance will remain active for up to 6 hours." -ForegroundColor Yellow
         Write-Host "Do not close this window to maintain the connection." -ForegroundColor Red
-
+        
         $counter = 0
         while ($true) {
           $counter++
           Write-Host "Session active - Heartbeat #$counter ($(Get-Date))" -ForegroundColor Green
-
-          try {
-            $tsStatus = & "C:\Program Files\Tailscale\tailscale.exe" status 2>&1 | Out-String
-            if ($tsStatus -match "offline" -or $tsStatus -match "Logged out" -or [string]::IsNullOrWhiteSpace($tsStatus)) {
-              Write-Host "Tailscale status: ERROR - Restarting..." -ForegroundColor Red
-              & "C:\Program Files\Tailscale\tailscale.exe" up --authkey "${{ secrets.TAILSCALE_AUTH_KEY }}" --hostname "enigmano-${{ github.run_id }}"
-            } else {
-              Write-Host "Tailscale status: ACTIVE" -ForegroundColor Green
-            }
-          } catch {
-            Write-Host "Tailscale check error: $_" -ForegroundColor Yellow
+          
+          $tsStatus = & "C:\Program Files\Tailscale\tailscale.exe" status
+          if ($tsStatus -match "active") {
+            Write-Host "Tailscale status: ACTIVE" -ForegroundColor Green
+          } else {
+            Write-Host "Tailscale status: ERROR - Restarting..." -ForegroundColor Red
+            & "C:\Program Files\Tailscale\tailscale.exe" up --authkey ${{ secrets.TAILSCALE_AUTH_KEY }} --hostname "enigmano-${{ github.run_id }}"
           }
-
+          
           Start-Sleep -Seconds 60
         }
