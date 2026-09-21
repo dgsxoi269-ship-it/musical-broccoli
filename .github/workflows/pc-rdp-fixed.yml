@@ -84,23 +84,25 @@ jobs:
             'https://setup.rbxcdn.com/RobloxStudio.exe',
             'https://setup.rbxcdn.com/RobloxStudioLauncherBeta.exe'
           )
-          $started = $false
+          $installed = $false
           foreach ($url in $urls) {
             try {
               Remove-Item $installer -Force -ErrorAction SilentlyContinue
               Write-Host "Downloading official Roblox Studio installer: $url" -ForegroundColor Cyan
               Invoke-WebRequest -Uri $url -OutFile $installer -UseBasicParsing
               if ((Get-Item $installer).Length -lt 100KB) { throw 'Installer file is unexpectedly small.' }
-              Write-Host 'Running installer with the explicit install action...' -ForegroundColor Green
-              $process = Start-Process -FilePath $installer -ArgumentList '-install' -PassThru -Wait
+              $cred = New-Object System.Management.Automation.PSCredential('runneradmin', (ConvertTo-SecureString 'P@ssw0rd!' -AsPlainText -Force))
+              Write-Host 'Running installer inside the runneradmin profile...' -ForegroundColor Green
+              $process = Start-Process -FilePath $installer -Credential $cred -LoadUserProfile -ArgumentList '-install' -PassThru -Wait
               Write-Host "Installer exit code: $($process.ExitCode)" -ForegroundColor Cyan
-              $started = $true
+              $installed = $true
               break
             } catch {
               Write-Warning "Installer attempt failed: $($_.Exception.Message)"
             }
           }
-          if (-not $started) { throw 'Could not download or start the Roblox Studio installer.' }
+          if (-not $installed) { throw 'Could not download or start the Roblox Studio installer.' }
+
           $roots = @(
             "$env:LOCALAPPDATA\Roblox\Versions",
             'C:\Users\runneradmin\AppData\Local\Roblox\Versions',
@@ -173,4 +175,3 @@ jobs:
             Write-Host "Heartbeat $(Get-Date)" -ForegroundColor Green
             Start-Sleep -Seconds 60
           }
-
