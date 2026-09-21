@@ -1,0 +1,176 @@
+name: PC RDP com Roblox Studio (corrigido)
+
+on:
+  workflow_dispatch:
+    inputs:
+      instance_number:
+        description: 'Instance Number (1-10)'
+        required: true
+        default: '1'
+        type: string
+
+jobs:
+  deploy-rdp:
+    runs-on: windows-latest
+    timeout-minutes: 360
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Enable RDP
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name 'fDenyTSConnections' -Value 0
+          Enable-NetFirewallRule -DisplayGroup 'Remote Desktop'
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name 'UserAuthentication' -Value 1
+          Write-Host 'RDP enabled.' -ForegroundColor Green
+
+      - name: Create RDP user
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $password = ConvertTo-SecureString 'P@ssw0rd!' -AsPlainText -Force
+          $user = Get-LocalUser -Name 'runneradmin' -ErrorAction SilentlyContinue
+          if ($null -eq $user) {
+            New-LocalUser -Name 'runneradmin' -Password $password -FullName 'runneradmin' -Description 'RDP User' -PasswordNeverExpires
+            Add-LocalGroupMember -Group 'Administrators' -Member 'runneradmin' -ErrorAction SilentlyContinue
+          } else {
+            Set-LocalUser -Name 'runneradmin' -Password $password
+          }
+          Add-LocalGroupMember -Group 'Remote Desktop Users' -Member 'runneradmin' -ErrorAction SilentlyContinue
+          Write-Host 'RDP user configured.' -ForegroundColor Green
+
+      - name: Install Tailscale
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $path = Join-Path $env:TEMP 'tailscale.msi'
+          Invoke-WebRequest -Uri 'https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi' -OutFile $path -UseBasicParsing
+          Start-Process msiexec.exe -ArgumentList "/i `"$path`" /quiet /norestart" -Wait
+          Remove-Item $path -Force -ErrorAction SilentlyContinue
+          if (-not (Test-Path 'C:\Program Files\Tailscale\tailscale.exe')) { throw 'Tailscale installation failed.' }
+
+      - name: Start Tailscale
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & 'C:\Program Files\Tailscale\tailscale.exe' up --authkey "${{ secrets.TAILSCALE_AUTH_KEY }}" --hostname "enigmano-${{ github.run_id }}"
+          Start-Sleep -Seconds 10
+          $ip = (& 'C:\Program Files\Tailscale\tailscale.exe' ip -4).Trim()
+          if ([string]::IsNullOrWhiteSpace($ip)) { throw 'Tailscale did not return an IPv4 address.' }
+          "TAILSCALE_IP=$ip" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "Tailscale IP: $ip" -ForegroundColor Green
+
+      - name: Install Chrome and 7-Zip
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $chrome = Join-Path $env:TEMP 'chrome.exe'
+          Invoke-WebRequest -Uri 'https://dl.google.com/chrome/install/latest/chrome_installer.exe' -OutFile $chrome -UseBasicParsing
+          Start-Process -FilePath $chrome -ArgumentList '/silent /install' -Wait
+          Remove-Item $chrome -Force -ErrorAction SilentlyContinue
+          $seven = Join-Path $env:TEMP '7zip.exe'
+          Invoke-WebRequest -Uri 'https://www.7-zip.org/a/7z2409-x64.exe' -OutFile $seven -UseBasicParsing
+          Start-Process -FilePath $seven -ArgumentList '/S' -Wait
+          Remove-Item $seven -Force -ErrorAction SilentlyContinue
+
+      - name: Install Roblox Studio (official bootstrapper)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installer = Join-Path $env:TEMP 'RobloxStudio.exe'
+          $urls = @(
+            'https://setup.rbxcdn.com/RobloxStudio.exe',
+            'https://setup.rbxcdn.com/RobloxStudioLauncherBeta.exe'
+          )
+          $started = $false
+          foreach ($url in $urls) {
+            try {
+              Remove-Item $installer -Force -ErrorAction SilentlyContinue
+              Write-Host "Downloading official Roblox Studio installer: $url" -ForegroundColor Cyan
+              Invoke-WebRequest -Uri $url -OutFile $installer -UseBasicParsing
+              if ((Get-Item $installer).Length -lt 100KB) { throw 'Installer file is unexpectedly small.' }
+              Write-Host 'Running installer with the explicit install action...' -ForegroundColor Green
+              $process = Start-Process -FilePath $installer -ArgumentList '-install' -PassThru -Wait
+              Write-Host "Installer exit code: $($process.ExitCode)" -ForegroundColor Cyan
+              $started = $true
+              break
+            } catch {
+              Write-Warning "Installer attempt failed: $($_.Exception.Message)"
+            }
+          }
+          if (-not $started) { throw 'Could not download or start the Roblox Studio installer.' }
+          $roots = @(
+            "$env:LOCALAPPDATA\Roblox\Versions",
+            'C:\Users\runneradmin\AppData\Local\Roblox\Versions',
+            'C:\Users\Default\AppData\Local\Roblox\Versions'
+          )
+          $studio = $null
+          for ($i = 0; $i -lt 120 -and -not $studio; $i++) {
+            foreach ($root in $roots) {
+              if (Test-Path $root) {
+                $match = Get-ChildItem -Path $root -Recurse -Filter 'RobloxStudioBeta.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
+                if ($match) { $studio = $match.FullName; break }
+              }
+            }
+            if (-not $studio) { Start-Sleep -Seconds 5 }
+          }
+          if (-not $studio) {
+            $match = Get-ChildItem -Path 'C:\Users' -Recurse -Filter 'RobloxStudioBeta.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($match) { $studio = $match.FullName }
+          }
+          if (-not $studio) { throw 'Roblox Studio was not found after the installation attempt.' }
+          "ROBLOX_STUDIO_PATH=$studio" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "Roblox Studio installed at: $studio" -ForegroundColor Green
+          Remove-Item $installer -Force -ErrorAction SilentlyContinue
+
+      - name: Apply dark personalization to runneradmin and default profile
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          function Set-DarkMode($hiveName, $hiveFile) {
+            if (-not (Test-Path $hiveFile)) { return }
+            & reg.exe load "HKU\$hiveName" $hiveFile | Out-Null
+            $key = "Registry::HKEY_USERS\$hiveName\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
+            New-Item -Path $key -Force | Out-Null
+            New-ItemProperty -Path $key -Name 'AppsUseLightTheme' -Value 0 -PropertyType DWord -Force | Out-Null
+            New-ItemProperty -Path $key -Name 'SystemUsesLightTheme' -Value 0 -PropertyType DWord -Force | Out-Null
+            & reg.exe unload "HKU\$hiveName" | Out-Null
+            Write-Host "Dark mode applied to $hiveName." -ForegroundColor Green
+          }
+          Set-DarkMode 'RunnerAdminHive' 'C:\Users\runneradmin\NTUSER.DAT'
+          Set-DarkMode 'DefaultHive' 'C:\Users\Default\NTUSER.DAT'
+          $current = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize'
+          New-Item -Path $current -Force | Out-Null
+          New-ItemProperty -Path $current -Name 'AppsUseLightTheme' -Value 0 -PropertyType DWord -Force | Out-Null
+          New-ItemProperty -Path $current -Name 'SystemUsesLightTheme' -Value 0 -PropertyType DWord -Force | Out-Null
+          Write-Host 'Dark personalization configured for the current session.' -ForegroundColor Green
+
+      - name: Details
+        shell: pwsh
+        run: |
+          $rdp = (Get-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name 'fDenyTSConnections').fDenyTSConnections -eq 0
+          $studio = $env:ROBLOX_STUDIO_PATH
+          $studioOk = $studio -and (Test-Path $studio)
+          $dark = (Get-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize' -Name 'AppsUseLightTheme' -ErrorAction SilentlyContinue).AppsUseLightTheme -eq 0
+          Write-Host '=== CONNECTION DETAILS ===' -ForegroundColor Cyan
+          Write-Host "Host: $env:TAILSCALE_IP"
+          Write-Host 'Username: runneradmin'
+          Write-Host 'Password: P@ssw0rd!'
+          Write-Host '=== STATUS ===' -ForegroundColor Yellow
+          Write-Host "RDP: $rdp"
+          Write-Host "Roblox Studio: $studioOk"
+          Write-Host "Dark mode: $dark"
+          Write-Host "Studio path: $studio"
+
+      - name: Keep Session Alive
+        shell: pwsh
+        run: |
+          Write-Host '=== SESSION ACTIVE ===' -ForegroundColor Green
+          Write-Host 'The RDP instance will remain active for up to 6 hours.' -ForegroundColor Yellow
+          while ($true) {
+            Write-Host "Heartbeat $(Get-Date)" -ForegroundColor Green
+            Start-Sleep -Seconds 60
+          }
+
