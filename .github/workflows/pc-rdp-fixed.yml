@@ -93,8 +93,8 @@ jobs:
               if ((Get-Item $installer).Length -lt 100KB) { throw 'Installer file is unexpectedly small.' }
               $cred = New-Object System.Management.Automation.PSCredential('runneradmin', (ConvertTo-SecureString 'P@ssw0rd!' -AsPlainText -Force))
               Write-Host 'Running installer inside the runneradmin profile...' -ForegroundColor Green
-              $process = Start-Process -FilePath $installer -Credential $cred -LoadUserProfile -ArgumentList '-install' -PassThru -Wait
-              Write-Host "Installer exit code: $($process.ExitCode)" -ForegroundColor Cyan
+              $process = Start-Process -FilePath $installer -Credential $cred -LoadUserProfile -ArgumentList '-install' -PassThru
+              Write-Host "Installer started with PID $($process.Id); polling for RobloxStudioBeta.exe..." -ForegroundColor Cyan
               $installed = $true
               break
             } catch {
@@ -122,7 +122,10 @@ jobs:
             $match = Get-ChildItem -Path 'C:\Users' -Recurse -Filter 'RobloxStudioBeta.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
             if ($match) { $studio = $match.FullName }
           }
-          if (-not $studio) { throw 'Roblox Studio was not found after the installation attempt.' }
+          if (-not $studio) {
+            if ($process -and -not $process.HasExited) { Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue }
+            throw 'Roblox Studio was not found after the installation attempt.'
+          }
           "ROBLOX_STUDIO_PATH=$studio" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           Write-Host "Roblox Studio installed at: $studio" -ForegroundColor Green
           Remove-Item $installer -Force -ErrorAction SilentlyContinue
